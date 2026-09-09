@@ -1,8 +1,10 @@
 services:
   street-highlighter:
-    image: ghcr.io/serega404/streethighlighter:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
     environment:
-      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_ENVIRONMENT: Development
       API_KEY: "${API_KEY}"
       EnableSwagger: "${EnableSwagger:-false}"
       ExternalServices__UserAgent: "${ExternalServices__UserAgent:-StreetHighlighter/1.0 (contact@example.com)}"
