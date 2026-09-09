@@ -1,0 +1,34 @@
+services:
+  street-highlighter:
+    image: ghcr.io/serega404/streethighlighter:main
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      API_KEY: "${API_KEY}"
+      EnableSwagger: "${EnableSwagger:-false}"
+      ExternalServices__UserAgent: "${ExternalServices__UserAgent:-StreetHighlighter/1.0 (contact@example.com)}"
+      ExternalServices__Nominatim__Url: "${ExternalServices__Nominatim__Url:-https://nominatim.openstreetmap.org/search}"
+      ExternalServices__Nominatim__TimeoutSeconds: "${ExternalServices__Nominatim__TimeoutSeconds:-10}"
+      ExternalServices__Nominatim__MaxRetries: "${ExternalServices__Nominatim__MaxRetries:-2}"
+      ExternalServices__Nominatim__RetryDelayMilliseconds: "${ExternalServices__Nominatim__RetryDelayMilliseconds:-500}"
+      ExternalServices__Nominatim__MaxResponseBytes: "${ExternalServices__Nominatim__MaxResponseBytes:-2097152}"
+      ExternalServices__Overpass__Url: "${ExternalServices__Overpass__Url:-https://overpass-api.de/api/interpreter}"
+      ExternalServices__Overpass__TimeoutSeconds: "${ExternalServices__Overpass__TimeoutSeconds:-30}"
+      ExternalServices__Overpass__MaxRetries: "${ExternalServices__Overpass__MaxRetries:-2}"
+      ExternalServices__Overpass__RetryDelayMilliseconds: "${ExternalServices__Overpass__RetryDelayMilliseconds:-1000}"
+      ExternalServices__Overpass__MaxResponseBytes: "${ExternalServices__Overpass__MaxResponseBytes:-67108864}"
+      ExternalServices__Tiles__Url: "${ExternalServices__Tiles__Url:-https://tile.openstreetmap.org/{z}/{x}/{y}.png}"
+      ExternalServices__Tiles__TimeoutSeconds: "${ExternalServices__Tiles__TimeoutSeconds:-10}"
+      ExternalServices__Tiles__MaxRetries: "${ExternalServices__Tiles__MaxRetries:-2}"
+      ExternalServices__Tiles__RetryDelayMilliseconds: "${ExternalServices__Tiles__RetryDelayMilliseconds:-250}"
+      ExternalServices__Tiles__MaxResponseBytes: "${ExternalServices__Tiles__MaxResponseBytes:-5242880}"
+    ports:
+      - "${STREETHIGHLIGHTER_PORT:-8080}:8080"
+    volumes:
+      - street-highlighter-cache:/app/Cache
+    restart: unless-stopped
+
+volumes:
+  street-highlighter-cache:

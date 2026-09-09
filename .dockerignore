@@ -1,0 +1,13 @@
+.git/
+.github/
+.idea/
+.vscode/
+**/bin/
+**/obj/
+**/Cache/
+**/*.user
+**/*.suo
+README.md
+README.en.md
+Dockerfile*
+.dockerignore
