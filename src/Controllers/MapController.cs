@@ -158,6 +158,7 @@ namespace StreetHighlighter.Controllers
             int offsetX = 0,
             [FromQuery, System.ComponentModel.DataAnnotations.Range(-4096, 4096, ErrorMessage = "OffsetY must be between -4096 and 4096 pixels.")]
             int offsetY = 0,
+            [FromQuery] bool exactStreetNames = false,
             [FromQuery] bool download = false)
         {
             var streetList = string.IsNullOrWhiteSpace(streets) 
@@ -173,6 +174,7 @@ namespace StreetHighlighter.Controllers
                 Zoom = zoom,
                 OffsetX = offsetX,
                 OffsetY = offsetY,
+                ExactStreetNames = exactStreetNames,
                 Style = new StyleSettings { Preset = preset ?? "default" }
             };
             return await GenerateMap(request, download);

@@ -122,6 +122,7 @@ namespace StreetHighlighter.Services
                         request.CityName,
                         request.HighlightStreets,
                         bounds,
+                        request.ExactStreetNames,
                         cancellationToken);
                 }
 

@@ -17,8 +17,10 @@ public sealed class ApiKeyAuthenticationMiddleware
 
     public async Task InvokeAsync(HttpContext context)
     {
-        if (string.IsNullOrWhiteSpace(_apiKey)
-            || !context.Request.Path.StartsWithSegments("/api/v1/map"))
+        var isProtectedEndpoint = context.Request.Path.StartsWithSegments("/api/v1/map")
+            || context.Request.Path.StartsWithSegments("/api/v1/streets");
+
+        if (string.IsNullOrWhiteSpace(_apiKey) || !isProtectedEndpoint)
         {
             await _next(context);
             return;

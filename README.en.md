@@ -50,33 +50,34 @@ http://localhost:5171/api/docs
 
 ## API usage
 
-Both generation methods use `/api/v1/map`. The simplified `GET` request is convenient for manual checks, while `POST` exposes all rendering options.
+Both generation methods use `/api/v1/map`. The simplified `GET` request is convenient for manual checks, while `POST` exposes all rendering options. A separate `GET /api/v1/streets` endpoint returns street names from OSM.
 
 ### API key
 
-The API is open by default. To protect map generation, set a non-empty `API_KEY` environment variable on the server:
+The API is open by default. To protect the API, set a non-empty `API_KEY` environment variable on the server:
 
 ```bash
 API_KEY='replace-with-a-long-random-secret' dotnet run --project src/StreetHighlighter.csproj --launch-profile http
 ```
 
-When `API_KEY` is configured, both `/api/v1/map` methods require the same value in the `X-API-Key` header; missing or invalid keys return `401 Unauthorized`. `/health` and Swagger UI remain available without a key. In Swagger, select **Authorize** and enter the key before sending a request.
+When `API_KEY` is configured, both `/api/v1/map` methods and `GET /api/v1/streets` require the same value in the `X-API-Key` header; missing or invalid keys return `401 Unauthorized`. `/health` and Swagger UI remain available without a key. In Swagger, select **Authorize** and enter the key before sending a request.
 
 ### GET `/api/v1/map`
 
 Query string parameters:
 
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `city` | `string` | — | Required city name. |
-| `streets` | `string` | empty | Comma-separated street names. Surrounding whitespace is trimmed. |
-| `preset` | `string` | `default` | Visual preset: `default`, `light`, or `dark`. |
-| `width` | `int` | `800` | PNG width in pixels. |
-| `height` | `int` | `600` | PNG height in pixels. |
-| `zoom` | `int?` | auto | Explicit Web Mercator zoom level. Without it, city bounds are fitted automatically. |
-| `offsetX` | `int` | `0` | Horizontal map-content offset in pixels. Positive values move the map right. |
-| `offsetY` | `int` | `0` | Vertical map-content offset in pixels. Positive values move the map down. |
-| `download` | `bool` | `false` | When `true`, returns `Content-Disposition: attachment` to download file. Default is `false` (inline for `<img>` tags and preview). |
+| Parameter          | Type     | Default   | Description                                                                                                                        |
+| ------------------ | -------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `city`             | `string` | —         | Required city name.                                                                                                                |
+| `streets`          | `string` | empty     | Comma-separated street names. Surrounding whitespace is trimmed.                                                                   |
+| `preset`           | `string` | `default` | Visual preset: `default`, `light`, or `dark`.                                                                                      |
+| `width`            | `int`    | `800`     | PNG width in pixels.                                                                                                               |
+| `height`           | `int`    | `600`     | PNG height in pixels.                                                                                                              |
+| `zoom`             | `int?`   | auto      | Explicit Web Mercator zoom level. Without it, city bounds are fitted automatically.                                                |
+| `offsetX`          | `int`    | `0`       | Horizontal map-content offset in pixels. Positive values move the map right.                                                       |
+| `offsetY`          | `int`    | `0`       | Vertical map-content offset in pixels. Positive values move the map down.                                                          |
+| `exactStreetNames` | `bool`   | `false`   | When `true`, the full street name must match the OSM `name` value; matching remains case-insensitive.                              |
+| `download`         | `bool`   | `false`   | When `true`, returns `Content-Disposition: attachment` to download file. Default is `false` (inline for `<img>` tags and preview). |
 
 Example:
 
@@ -90,10 +91,45 @@ curl --get 'http://localhost:5171/api/v1/map' \
   --data-urlencode 'height=800' \
   --data-urlencode 'offsetX=100' \
   --data-urlencode 'offsetY=-50' \
+  --data-urlencode 'exactStreetNames=true' \
   --output map.png
 ```
 
 The `GET` endpoint does not expose highlight color, opacity, or line width. Use `POST` for these options.
+
+### GET `/api/v1/streets`
+
+Returns unique OSM `name` values for named roads within the resolved city's bounding box. Names are sorted case-insensitively. Objects without both `highway` and `name` tags are excluded.
+
+```bash
+curl --get 'http://localhost:5171/api/v1/streets' \
+  --header 'X-API-Key: replace-with-your-key' \
+  --data-urlencode 'city=New York'
+```
+
+Example response:
+
+```json
+{
+  "cityName": "New York",
+  "cityNames": [
+    "New York",
+    "New York, United States"
+  ],
+  "streets": [
+    "100th Avenue",
+    "100th Drive",
+    "100th Place",
+    "100th Road",
+    "100th Street",
+    ...
+  ]
+}
+```
+
+`cityName` contains the short resolved name, or the original query when Nominatim does not provide one. `cityNames` contains the available unique variants in this order: the client query, short name, and full Nominatim display name. The list reflects current OSM data: streets without their own `name` tag, including names found only in `addr:street`, are not included.
+
+The endpoint returns `400` for an invalid `city` parameter, `404` when the city is not found, `502`/`504` for external-service failures, and `500` for an unexpected internal error.
 
 ### POST `/api/v1/map`
 
@@ -104,10 +140,10 @@ curl --request POST 'http://localhost:5171/api/v1/map' \
   --header 'Content-Type: application/json' \
   --header 'X-API-Key: replace-with-your-key' \
   --data '{
-    "cityName": "Berlin",
+    "cityName": "New York",
     "highlightStreets": [
-      "Unter den Linden",
-      "Friedrichstraße"
+      "100th Avenue",
+      "5th Avenue"
     ],
     "style": {
       "preset": "dark",
@@ -119,32 +155,34 @@ curl --request POST 'http://localhost:5171/api/v1/map' \
     "height": 800,
     "zoom": null,
     "offsetX": 100,
-    "offsetY": -50
+    "offsetY": -50,
+    "exactStreetNames": true
   }' \
   --output map.png
 ```
 
 Request body fields:
 
-| Field | Type | Default | Description |
-| --- | --- | --- | --- |
-| `cityName` | `string` | — | Required city name. |
-| `highlightStreets` | `string[]` | `[]` | Streets to highlight. |
-| `style` | `object` | default style | Base-map and line options. Do not pass `null`. |
-| `width` | `int` | `800` | Output width in pixels. |
-| `height` | `int` | `600` | Output height in pixels. |
-| `zoom` | `int?` | `null` | Explicit zoom level, or automatic city fitting when omitted. |
-| `offsetX` | `int` | `0` | Horizontal map offset in pixels: positive moves right, negative moves left. |
-| `offsetY` | `int` | `0` | Vertical map offset in pixels: positive moves down, negative moves up. |
+| Field              | Type       | Default       | Description                                                                 |
+| ------------------ | ---------- | ------------- | --------------------------------------------------------------------------- |
+| `cityName`         | `string`   | —             | Required city name.                                                         |
+| `highlightStreets` | `string[]` | `[]`          | Streets to highlight.                                                       |
+| `style`            | `object`   | default style | Base-map and line options. Do not pass `null`.                              |
+| `width`            | `int`      | `800`         | Output width in pixels.                                                     |
+| `height`           | `int`      | `600`         | Output height in pixels.                                                    |
+| `zoom`             | `int?`     | `null`        | Explicit zoom level, or automatic city fitting when omitted.                |
+| `offsetX`          | `int`      | `0`           | Horizontal map offset in pixels: positive moves right, negative moves left. |
+| `offsetY`          | `int`      | `0`           | Vertical map offset in pixels: positive moves down, negative moves up.      |
+| `exactStreetNames` | `bool`     | `false`       | Require a full case-insensitive street-name match.                          |
 
 The `style` object accepts:
 
-| Field | Type | Default | Description |
-| --- | --- | --- | --- |
-| `preset` | `string` | `default` | `default`, `light`, or `dark`. |
-| `highlightColor` | `string` | `#FF5733` | Line color in HEX notation. |
-| `opacity` | `float` | `1.0` | Highlight opacity from `0.0` to `1.0`. |
-| `strokeWidth` | `float` | `5.0` | Line width in pixels. |
+| Field            | Type     | Default   | Description                            |
+| ---------------- | -------- | --------- | -------------------------------------- |
+| `preset`         | `string` | `default` | `default`, `light`, or `dark`.         |
+| `highlightColor` | `string` | `#FF5733` | Line color in HEX notation.            |
+| `opacity`        | `float`  | `1.0`     | Highlight opacity from `0.0` to `1.0`. |
+| `strokeWidth`    | `float`  | `5.0`     | Line width in pixels.                  |
 
 `default` uses standard light tiles, `light` adds a soft white blend, and `dark` inverts luminance for a dark theme style.
 
@@ -172,6 +210,7 @@ An empty street list still produces a city map, but without vector highlights.
 ## Street matching behavior
 
 - Overpass matching is case-insensitive.
+- By default, names are matched as substrings to preserve existing behavior. With `exactStreetNames=true`, the complete `name` tag must match; for example, `1st New Lane` does not match `11th New Lane`.
 - Street names are escaped and combined into an optimized regular expression for Overpass QL, significantly reducing Overpass query complexity and latency.
 - Search is restricted to the city's bounding box resolved via Nominatim.
 - Nominatim selects the best matching `place` or `boundary` result. Qualify ambiguous names with a region and country, for example `Springfield, Illinois, USA`.
@@ -187,6 +226,8 @@ src/Cache/
 ├── Geo/
 │   ├── bounds_<city>_<hash>.json
 │   ├── bounds_notfound_<hash>.json
+│   ├── city_names_<hash>.json
+│   ├── street_names_<hash>.json
 │   └── streets_<hash>.json
 └── Tiles/
     └── <provider-hash>/<z>/<x>/<y>.png
@@ -194,6 +235,8 @@ src/Cache/
 
 - `bounds_*.json` contains resolved city bounds;
 - `bounds_notfound_*.json` contains negative cache markers for unresolved cities (TTL 24 hours);
+- `city_names_*.json` contains short and full city names returned by Nominatim;
+- `street_names_*.json` contains the sorted unique street-name list;
 - `streets_*.json` contains geometry for a city and normalized street list;
 - `Tiles` stores tiles by their `z/x/y` coordinates;
 - final PNG files are not cached and are rendered for every request;
@@ -223,15 +266,15 @@ docker compose up --build -d
 
 Swagger stays disabled unless `EnableSwagger=true` is explicitly provided. The cache persists in the `street-highlighter-cache` named volume without host permission setup.
 
-City-bounds entries are refreshed after 7 days, while street-geometry entries are refreshed after 24 hours. Tile caches are namespaced by a hash of the provider URL, so changing `ExternalServices:Tiles:Url` cannot mix old tiles with the new source.
+City bounds and names are refreshed after 7 days; street-name lists and street geometry are refreshed after 24 hours. Tile caches are namespaced by a hash of the provider URL, so changing `ExternalServices:Tiles:Url` cannot mix old tiles with the new source.
 
 Current default integrations:
 
-| Purpose | Service |
-| --- | --- |
-| Resolve city bounds | `https://nominatim.openstreetmap.org/search` |
-| Retrieve street geometry | `https://overpass-api.de/api/interpreter` |
-| Fetch raster tiles | `https://tile.openstreetmap.org/{z}/{x}/{y}.png` |
+| Purpose                  | Service                                          |
+| ------------------------ | ------------------------------------------------ |
+| Resolve city bounds      | `https://nominatim.openstreetmap.org/search`     |
+| Retrieve street geometry | `https://overpass-api.de/api/interpreter`        |
+| Fetch raster tiles       | `https://tile.openstreetmap.org/{z}/{x}/{y}.png` |
 
 ## Project structure
 
@@ -243,11 +286,13 @@ StreetHighlighter/
 │   ├── Configuration/
 │   │   └── ExternalServicesOptions.cs
 │   ├── Controllers/
-│   │   └── MapController.cs
+│   │   ├── MapController.cs
+│   │   └── StreetsController.cs
 │   ├── Infrastructure/
 │   │   └── PerformanceLogger.cs
 │   ├── Models/
 │   │   ├── MapRequest.cs
+│   │   ├── StreetsResponse.cs
 │   │   └── StyleSettings.cs
 │   ├── Services/
 │   │   ├── CacheCleanupHostedService.cs
@@ -310,7 +355,7 @@ Check spelling and qualify the city with its region or country. Make sure `nomin
 
 ### The map is generated, but no streets are highlighted
 
-Check object names in OpenStreetMap. The Overpass area name must match the city name, and the roads must have a `name` tag. Also inspect the logs for Overpass errors or overload responses.
+Check object names in OpenStreetMap: matching roads must have a `name` tag. Also inspect the logs for Overpass errors or overload responses.
 
 ### Parts of the map are blank
 

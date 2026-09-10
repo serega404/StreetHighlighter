@@ -12,14 +12,23 @@ namespace StreetHighlighter.Services
     public readonly record struct GeoPoint(double Lat, double Lon);
     public record GeoBounds(double MinLat, double MinLon, double MaxLat, double MaxLon);
     public record GeoPath(List<GeoPoint> Points);
+    public sealed record CityInfo(GeoBounds Bounds, string Name, string? DisplayName);
+
+    internal sealed record CityNamesCache(string Name, string? DisplayName);
 
     public interface IGeoDataService
     {
         Task<GeoBounds?> GetCityBoundsAsync(string cityName, CancellationToken cancellationToken = default);
+        Task<CityInfo?> GetCityInfoAsync(string cityName, CancellationToken cancellationToken = default);
+        Task<List<string>> GetStreetNamesAsync(
+            string cityName,
+            GeoBounds bounds,
+            CancellationToken cancellationToken = default);
         Task<List<GeoPath>> GetStreetGeometryAsync(
             string cityName,
             List<string> streets,
             GeoBounds? bounds = null,
+            bool exactStreetNames = false,
             CancellationToken cancellationToken = default);
     }
 
@@ -31,6 +40,7 @@ namespace StreetHighlighter.Services
         private const int MaxStreetPoints = 1_000_000;
         private static readonly ConcurrentDictionary<string, Task<GeoBounds?>> _inFlightBounds = new(StringComparer.OrdinalIgnoreCase);
         private static readonly ConcurrentDictionary<string, Task<List<GeoPath>>> _inFlightStreets = new(StringComparer.Ordinal);
+        private static readonly ConcurrentDictionary<string, Task<List<string>>> _inFlightStreetNames = new(StringComparer.Ordinal);
         private static readonly SemaphoreSlim _nominatimThrottle = new(1, 1);
         private static readonly SemaphoreSlim _overpassThrottle = new(2, 2);
         private static DateTime _lastNominatimRequestUtc = DateTime.MinValue;
@@ -104,6 +114,24 @@ namespace StreetHighlighter.Services
             }
         }
 
+        public async Task<CityInfo?> GetCityInfoAsync(
+            string cityName,
+            CancellationToken cancellationToken = default)
+        {
+            var bounds = await GetCityBoundsAsync(cityName, cancellationToken);
+            if (bounds == null)
+            {
+                return null;
+            }
+
+            var fallbackName = cityName.Trim();
+            var names = await LoadCityNamesFromCacheAsync(cityName, cancellationToken);
+            return new CityInfo(
+                bounds,
+                string.IsNullOrWhiteSpace(names?.Name) ? fallbackName : names.Name,
+                string.IsNullOrWhiteSpace(names?.DisplayName) ? null : names.DisplayName);
+        }
+
         private async Task<GeoBounds?> GetCityBoundsInternalAsync(
             string cityName,
             CancellationToken cancellationToken)
@@ -162,7 +190,7 @@ namespace StreetHighlighter.Services
             }
 
             var separator = _externalServices.Nominatim.Url.Contains('?', StringComparison.Ordinal) ? '&' : '?';
-            var url = $"{_externalServices.Nominatim.Url}{separator}q={Uri.EscapeDataString(cityName)}&format=json&limit=5&addressdetails=1";
+            var url = $"{_externalServices.Nominatim.Url}{separator}q={Uri.EscapeDataString(cityName)}&format=json&limit=5&addressdetails=1&namedetails=1";
 
             await _nominatimThrottle.WaitAsync(cancellationToken);
             HttpResponseMessage response;
@@ -249,6 +277,11 @@ namespace StreetHighlighter.Services
 
                 // Save to cache atomically
                 await SaveBoundsToCacheAsync(cacheFile, bounds, cancellationToken);
+                await SaveCityNamesToCacheAsync(
+                    cityName,
+                    GetCanonicalCityName(selectedResult!, cityName),
+                    selectedResult?["display_name"]?.ToString(),
+                    cancellationToken);
 
                 return bounds;
             }
@@ -283,10 +316,267 @@ namespace StreetHighlighter.Services
             }
         }
 
+        private async Task<CityNamesCache?> LoadCityNamesFromCacheAsync(
+            string cityName,
+            CancellationToken cancellationToken)
+        {
+            var cacheFile = Path.Combine(_cacheDir, GetCityNamesCacheFileName(cityName));
+            if (!File.Exists(cacheFile))
+            {
+                return null;
+            }
+
+            try
+            {
+                if (DateTime.UtcNow - File.GetLastWriteTimeUtc(cacheFile) >= BoundsCacheLifetime)
+                {
+                    TryDeleteFile(cacheFile);
+                    return null;
+                }
+
+                await using var fs = File.OpenRead(cacheFile);
+                return await JsonSerializer.DeserializeAsync<CityNamesCache>(
+                    fs,
+                    cancellationToken: cancellationToken);
+            }
+            catch (IOException ex)
+            {
+                _logger.LogWarning(ex, "Failed to read city names cache due to IO error for {City}", cityName);
+                TryDeleteFile(cacheFile);
+                return null;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to deserialize city names cache for {City}", cityName);
+                TryDeleteFile(cacheFile);
+                return null;
+            }
+        }
+
+        private async Task SaveCityNamesToCacheAsync(
+            string cityName,
+            string name,
+            string? displayName,
+            CancellationToken cancellationToken)
+        {
+            var cacheFile = Path.Combine(_cacheDir, GetCityNamesCacheFileName(cityName));
+            await SaveJsonAtomicallyAsync(
+                cacheFile,
+                new CityNamesCache(name, displayName),
+                "city names",
+                cancellationToken);
+        }
+
+        private static string GetCanonicalCityName(JsonNode selectedResult, string fallbackName)
+        {
+            var name = selectedResult["name"]?.ToString();
+            if (!string.IsNullOrWhiteSpace(name))
+            {
+                return name;
+            }
+
+            if (selectedResult["address"] is JsonObject address)
+            {
+                foreach (var key in new[] { "city", "town", "village", "municipality", "administrative" })
+                {
+                    name = address[key]?.ToString();
+                    if (!string.IsNullOrWhiteSpace(name))
+                    {
+                        return name;
+                    }
+                }
+            }
+
+            return fallbackName.Trim();
+        }
+
+        public async Task<List<string>> GetStreetNamesAsync(
+            string cityName,
+            GeoBounds bounds,
+            CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrWhiteSpace(cityName))
+            {
+                return new List<string>();
+            }
+
+            var normalizedCity = cityName.Trim().ToLowerInvariant();
+            var boundsKey = $"{bounds.MinLat.ToString("F3", CultureInfo.InvariantCulture)},{bounds.MinLon.ToString("F3", CultureInfo.InvariantCulture)},{bounds.MaxLat.ToString("F3", CultureInfo.InvariantCulture)},{bounds.MaxLon.ToString("F3", CultureInfo.InvariantCulture)}";
+            var key = CreateMd5($"{normalizedCity}_{boundsKey}");
+
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (_inFlightStreetNames.TryGetValue(key, out var existingTask))
+                {
+                    try
+                    {
+                        return await existingTask.WaitAsync(cancellationToken);
+                    }
+                    catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                    {
+                        continue;
+                    }
+                }
+
+                var tcs = new TaskCompletionSource<List<string>>(TaskCreationOptions.RunContinuationsAsynchronously);
+                if (_inFlightStreetNames.TryAdd(key, tcs.Task))
+                {
+                    try
+                    {
+                        var result = await GetStreetNamesInternalAsync(bounds, key, cancellationToken);
+                        tcs.TrySetResult(result);
+                        return result;
+                    }
+                    catch (Exception ex)
+                    {
+                        tcs.TrySetException(ex);
+                        throw;
+                    }
+                    finally
+                    {
+                        _inFlightStreetNames.TryRemove(key, out _);
+                    }
+                }
+            }
+        }
+
+        private async Task<List<string>> GetStreetNamesInternalAsync(
+            GeoBounds bounds,
+            string key,
+            CancellationToken cancellationToken)
+        {
+            var cacheFile = Path.Combine(_cacheDir, $"street_names_{key}.json");
+            var cached = await LoadStreetNamesFromCacheAsync(cacheFile, cancellationToken);
+            if (cached != null)
+            {
+                return cached;
+            }
+
+            var timeoutSeconds = Math.Clamp(_externalServices.Overpass.TimeoutSeconds, 5, 300);
+            var minLat = bounds.MinLat.ToString(CultureInfo.InvariantCulture);
+            var minLon = bounds.MinLon.ToString(CultureInfo.InvariantCulture);
+            var maxLat = bounds.MaxLat.ToString(CultureInfo.InvariantCulture);
+            var maxLon = bounds.MaxLon.ToString(CultureInfo.InvariantCulture);
+            var query = $@"
+                [out:json][timeout:{timeoutSeconds}][maxsize:{_externalServices.Overpass.MaxResponseBytes}];
+                way[""highway""][""name""]({minLat},{minLon},{maxLat},{maxLon});
+                for (t[""name""])
+                {{
+                  make street name=_.val;
+                  out tags;
+                }}
+            ";
+
+            try
+            {
+                await _overpassThrottle.WaitAsync(cancellationToken);
+                HttpResponseMessage response;
+                try
+                {
+                    response = await _externalHttp.SendAsync(
+                        ExternalHttpClientNames.Overpass,
+                        _externalServices.Overpass,
+                        () => new HttpRequestMessage(HttpMethod.Post, _externalServices.Overpass.Url)
+                        {
+                            Content = new FormUrlEncodedContent(new[]
+                            {
+                                new KeyValuePair<string, string>("data", query)
+                            })
+                        },
+                        cancellationToken);
+                }
+                finally
+                {
+                    _overpassThrottle.Release();
+                }
+
+                using (response)
+                {
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        _logger.LogError("Overpass API error: {StatusCode}", response.StatusCode);
+                        throw new ExternalServiceException("Overpass", $"Server returned HTTP {(int)response.StatusCode}");
+                    }
+
+                    using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+                    var doc = await JsonNode.ParseAsync(stream, cancellationToken: cancellationToken);
+                    if (doc?["remark"] != null)
+                    {
+                        var remark = doc["remark"]?.ToString() ?? "Unknown Overpass error remark";
+                        _logger.LogWarning("Overpass returned error remark: {Remark}", remark);
+                        throw new ExternalServiceException("Overpass", remark);
+                    }
+
+                    var streetNames = doc?["elements"]?.AsArray()
+                        .Select(element => element?["tags"]?["name"]?.ToString())
+                        .Where(name => !string.IsNullOrWhiteSpace(name))
+                        .Select(name => name!.Trim())
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+                        .ToList() ?? new List<string>();
+
+                    await SaveJsonAtomicallyAsync(cacheFile, streetNames, "street names", cancellationToken);
+                    return streetNames;
+                }
+            }
+            catch (ExternalServiceException)
+            {
+                throw;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error fetching street names from Overpass");
+                throw new ExternalServiceException("Overpass", "Failed to query or parse street names", ex);
+            }
+        }
+
+        private async Task<List<string>?> LoadStreetNamesFromCacheAsync(
+            string cacheFile,
+            CancellationToken cancellationToken)
+        {
+            if (!File.Exists(cacheFile))
+            {
+                return null;
+            }
+
+            try
+            {
+                if (DateTime.UtcNow - File.GetLastWriteTimeUtc(cacheFile) >= StreetsCacheLifetime)
+                {
+                    TryDeleteFile(cacheFile);
+                    return null;
+                }
+
+                await using var fs = File.OpenRead(cacheFile);
+                return await JsonSerializer.DeserializeAsync<List<string>>(
+                    fs,
+                    cancellationToken: cancellationToken);
+            }
+            catch (IOException ex)
+            {
+                _logger.LogWarning(ex, "Failed to read street names cache due to IO error");
+                TryDeleteFile(cacheFile);
+                return null;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to deserialize street names cache");
+                TryDeleteFile(cacheFile);
+                return null;
+            }
+        }
+
         public async Task<List<GeoPath>> GetStreetGeometryAsync(
             string cityName,
             List<string> streets,
             GeoBounds? bounds = null,
+            bool exactStreetNames = false,
             CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(cityName)) return new List<GeoPath>();
@@ -305,7 +595,10 @@ namespace StreetHighlighter.Services
                 ? $"_{bounds.MinLat.ToString("F3", CultureInfo.InvariantCulture)},{bounds.MinLon.ToString("F3", CultureInfo.InvariantCulture)},{bounds.MaxLat.ToString("F3", CultureInfo.InvariantCulture)},{bounds.MaxLon.ToString("F3", CultureInfo.InvariantCulture)}"
                 : string.Empty;
             var normalizedStreetsKey = string.Join("|", validStreets.Select(s => s.ToLowerInvariant()).OrderBy(s => s, StringComparer.Ordinal));
-            var key = CreateMd5($"{normalizedCity}{boundsKey}_{normalizedStreetsKey}");
+            var keyInput = exactStreetNames
+                ? $"{normalizedCity}{boundsKey}_exact_{normalizedStreetsKey}"
+                : $"{normalizedCity}{boundsKey}_{normalizedStreetsKey}";
+            var key = CreateMd5(keyInput);
 
             while (true)
             {
@@ -329,7 +622,13 @@ namespace StreetHighlighter.Services
                 {
                     try
                     {
-                        var result = await GetStreetGeometryInternalAsync(cityName, validStreets, bounds, key, cancellationToken);
+                        var result = await GetStreetGeometryInternalAsync(
+                            cityName,
+                            validStreets,
+                            bounds,
+                            exactStreetNames,
+                            key,
+                            cancellationToken);
                         tcs.TrySetResult(result);
                         return result;
                     }
@@ -350,6 +649,7 @@ namespace StreetHighlighter.Services
             string cityName,
             List<string> validStreets,
             GeoBounds? bounds,
+            bool exactStreetNames,
             string key,
             CancellationToken cancellationToken)
         {
@@ -397,6 +697,9 @@ namespace StreetHighlighter.Services
             string streetQueryPart;
             string areaPart;
             var combinedRegex = string.Join("|", validStreets.Select(EscapeOverpassRegex));
+            var streetNamePattern = exactStreetNames
+                ? $"^({combinedRegex})$"
+                : $"({combinedRegex})";
 
             if (bounds != null)
             {
@@ -406,13 +709,13 @@ namespace StreetHighlighter.Services
                 var maxLon = bounds.MaxLon.ToString(CultureInfo.InvariantCulture);
 
                 areaPart = string.Empty;
-                streetQueryPart = $"way[\"highway\"][\"name\"~\"({combinedRegex})\",i]({minLat},{minLon},{maxLat},{maxLon});";
+                streetQueryPart = $"way[\"highway\"][\"name\"~\"{streetNamePattern}\",i]({minLat},{minLon},{maxLat},{maxLon});";
             }
             else
             {
                 var escapedCity = EscapeOverpassStringLiteral(cityName.Trim());
                 areaPart = $@"area[""name""=""{escapedCity}""]->.a;";
-                streetQueryPart = $"way[\"highway\"][\"name\"~\"({combinedRegex})\",i](area.a);";
+                streetQueryPart = $"way[\"highway\"][\"name\"~\"{streetNamePattern}\",i](area.a);";
             }
 
             var query = $@"
@@ -554,6 +857,40 @@ namespace StreetHighlighter.Services
             }
         }
 
+        private async Task SaveJsonAtomicallyAsync<T>(
+            string cacheFile,
+            T value,
+            string cacheDescription,
+            CancellationToken cancellationToken)
+        {
+            EnsureCacheDirectoryExists();
+            var tempFile = Path.Combine(_cacheDir, $".tmp_{Guid.NewGuid():N}.json");
+            try
+            {
+                await using (var fs = File.Create(tempFile))
+                {
+                    await JsonSerializer.SerializeAsync(fs, value, cancellationToken: cancellationToken);
+                }
+
+                File.Move(tempFile, cacheFile, overwrite: true);
+            }
+            catch (IOException) when (File.Exists(cacheFile))
+            {
+                // Concurrently written by another request.
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to write {CacheDescription} cache", cacheDescription);
+            }
+            finally
+            {
+                if (File.Exists(tempFile))
+                {
+                    try { File.Delete(tempFile); } catch { }
+                }
+            }
+        }
+
         private void EnsureCacheDirectoryExists()
         {
             if (!Directory.Exists(_cacheDir))
@@ -604,6 +941,12 @@ namespace StreetHighlighter.Services
                 .ToArray();
             var prefix = safeChars.Length > 0 ? new string(safeChars) + "_" : string.Empty;
             return $"bounds_{prefix}{hash}.json";
+        }
+
+        private static string GetCityNamesCacheFileName(string cityName)
+        {
+            var normalized = cityName.Trim().ToLowerInvariant();
+            return $"city_names_{CreateMd5(normalized)}.json";
         }
 
         private static string EscapeOverpassStringLiteral(string value)

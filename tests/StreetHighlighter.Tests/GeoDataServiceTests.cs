@@ -39,15 +39,20 @@ public class GeoDataServiceTests
         : IExternalHttpService
     {
         public int CallCount { get; private set; }
+        public string? LastRequestBody { get; private set; }
 
-        public Task<HttpResponseMessage> SendAsync(
+        public async Task<HttpResponseMessage> SendAsync(
             string clientName,
             ExternalServiceOptions options,
             Func<HttpRequestMessage> requestFactory,
             CancellationToken cancellationToken)
         {
             CallCount++;
-            return Task.FromResult(responseFactory(clientName));
+            using var request = requestFactory();
+            LastRequestBody = request.Content == null
+                ? null
+                : await request.Content.ReadAsStringAsync(cancellationToken);
+            return responseFactory(clientName);
         }
     }
 
@@ -82,6 +87,41 @@ public class GeoDataServiceTests
             var result = await service.GetCityBoundsAsync(cityName);
 
             Assert.Null(result);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+    }
+
+    [Fact]
+    public async Task GetCityInfoAsync_LegacyBoundsCache_ReturnsInputNameWithoutCallingHttp()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"sh_geo_test_{Guid.NewGuid():N}");
+        try
+        {
+            var cityName = "LegacyCity";
+            var geoCacheDir = Path.Combine(tempDir, "Cache", "Geo");
+            Directory.CreateDirectory(geoCacheDir);
+            await File.WriteAllTextAsync(
+                Path.Combine(geoCacheDir, GetBoundsCacheFileName(cityName)),
+                JsonSerializer.Serialize(new GeoBounds(1, 2, 3, 4)));
+
+            var service = new GeoDataService(
+                new ThrowingExternalHttpService(),
+                Options.Create(new ExternalServicesOptions()),
+                new FakeWebHostEnvironment { ContentRootPath = tempDir },
+                NullLogger<GeoDataService>.Instance);
+
+            var result = await service.GetCityInfoAsync($" {cityName} ");
+
+            Assert.NotNull(result);
+            Assert.Equal(cityName, result.Name);
+            Assert.Null(result.DisplayName);
+            Assert.Equal(new GeoBounds(1, 2, 3, 4), result.Bounds);
         }
         finally
         {
@@ -155,6 +195,114 @@ public class GeoDataServiceTests
 
             Assert.Single(result);
             Assert.Equal([new GeoPoint(10, 20), new GeoPoint(11, 21)], result[0].Points);
+            Assert.Equal(1, http.CallCount);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+    }
+
+    [Fact]
+    public async Task GetStreetGeometryAsync_ExactMode_UsesAnchoredRegexAndSeparateCache()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"sh_geo_test_{Guid.NewGuid():N}");
+        try
+        {
+            var http = new RespondingExternalHttpService(_ => new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"elements\":[]}")
+            });
+            var service = CreateService(tempDir, http);
+            var cityName = $"ExactCity-{Guid.NewGuid():N}";
+            var bounds = new GeoBounds(1, 3, 2, 4);
+            var streets = new List<string> { "1-й Новый переулок" };
+
+            await service.GetStreetGeometryAsync(cityName, streets, bounds, exactStreetNames: false);
+            var containsQuery = System.Net.WebUtility.UrlDecode(http.LastRequestBody!);
+            await service.GetStreetGeometryAsync(cityName, streets, bounds, exactStreetNames: true);
+            var exactQuery = System.Net.WebUtility.UrlDecode(http.LastRequestBody!);
+
+            Assert.Equal(2, http.CallCount);
+            Assert.DoesNotContain("~\"^(", containsQuery);
+            Assert.Contains("~\"^(", exactQuery);
+            Assert.Contains(")$\",i]", exactQuery);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+    }
+
+    [Fact]
+    public async Task GetStreetNamesAsync_ReturnsSortedUniqueOsmNamesAndUsesCache()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"sh_geo_test_{Guid.NewGuid():N}");
+        try
+        {
+            var http = new RespondingExternalHttpService(_ => new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    "{\"elements\":[" +
+                    "{\"tags\":{\"name\":\"улица Морозова\"}}," +
+                    "{\"tags\":{\"name\":\"улица Инициативная\"}}," +
+                    "{\"tags\":{\"name\":\"УЛИЦА МОРОЗОВА\"}}," +
+                    "{\"tags\":{}}]}")
+            });
+            var service = CreateService(tempDir, http);
+            var cityName = $"StreetListCity-{Guid.NewGuid():N}";
+            var bounds = new GeoBounds(47.1, 38.7, 47.3, 39.0);
+
+            var first = await service.GetStreetNamesAsync(cityName, bounds);
+            var second = await service.GetStreetNamesAsync(cityName, bounds);
+
+            Assert.Equal(["улица Инициативная", "улица Морозова"], first);
+            Assert.Equal(first, second);
+            Assert.Equal(1, http.CallCount);
+            var query = System.Net.WebUtility.UrlDecode(http.LastRequestBody!);
+            Assert.Contains("way[\"highway\"][\"name\"]", query);
+            Assert.Contains("for (t[\"name\"])", query);
+            Assert.Contains("make street name=_.val", query);
+            Assert.Contains("out tags", query);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+    }
+
+    [Fact]
+    public async Task GetCityInfoAsync_NominatimMetadataIsReturnedWithoutSecondRequest()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"sh_geo_test_{Guid.NewGuid():N}");
+        try
+        {
+            var http = new RespondingExternalHttpService(_ => new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    "[{\"class\":\"place\",\"addresstype\":\"city\",\"name\":\"Таганрог\"," +
+                    "\"display_name\":\"Таганрог, Ростовская область, Россия\"," +
+                    "\"boundingbox\":[\"47.1\",\"47.3\",\"38.7\",\"39.0\"]}]")
+            });
+            var service = CreateService(tempDir, http);
+            var cityName = $"taganrog-{Guid.NewGuid():N}";
+
+            var first = await service.GetCityInfoAsync(cityName);
+            var second = await service.GetCityInfoAsync(cityName);
+
+            Assert.NotNull(first);
+            Assert.Equal("Таганрог", first.Name);
+            Assert.Equal("Таганрог, Ростовская область, Россия", first.DisplayName);
+            Assert.Equal(first, second);
             Assert.Equal(1, http.CallCount);
         }
         finally

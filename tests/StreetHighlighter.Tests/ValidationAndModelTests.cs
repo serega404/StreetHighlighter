@@ -7,6 +7,12 @@ namespace StreetHighlighter.Tests;
 public class ValidationAndModelTests
 {
     [Fact]
+    public void MapRequest_ExactStreetNames_DefaultsToFalse()
+    {
+        Assert.False(new MapRequest().ExactStreetNames);
+    }
+
+    [Fact]
     public void MapRequest_ValidRequest_PassesValidation()
     {
         var request = new MapRequest

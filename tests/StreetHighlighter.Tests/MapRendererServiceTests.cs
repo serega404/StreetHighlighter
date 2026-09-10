@@ -15,16 +15,30 @@ public class MapRendererServiceTests
     {
         public GeoBounds? Bounds { get; set; } = new(47.20, 38.80, 47.25, 38.90);
         public List<GeoPath> Streets { get; set; } = new();
+        public bool? LastExactStreetNames { get; private set; }
 
         public Task<GeoBounds?> GetCityBoundsAsync(string cityName, CancellationToken cancellationToken = default)
             => Task.FromResult(Bounds);
+
+        public Task<CityInfo?> GetCityInfoAsync(string cityName, CancellationToken cancellationToken = default)
+            => Task.FromResult(Bounds == null ? null : new CityInfo(Bounds, cityName, null));
+
+        public Task<List<string>> GetStreetNamesAsync(
+            string cityName,
+            GeoBounds bounds,
+            CancellationToken cancellationToken = default)
+            => Task.FromResult(new List<string>());
 
         public Task<List<GeoPath>> GetStreetGeometryAsync(
             string cityName,
             List<string> streets,
             GeoBounds? bounds = null,
+            bool exactStreetNames = false,
             CancellationToken cancellationToken = default)
-            => Task.FromResult(Streets);
+        {
+            LastExactStreetNames = exactStreetNames;
+            return Task.FromResult(Streets);
+        }
     }
 
     private class FakeTileCacheService : ITileCacheService
@@ -201,6 +215,25 @@ public class MapRendererServiceTests
         }
 
         Assert.True(foundRed, "Expected to find red street line pixels on the rendered map.");
+    }
+
+    [Fact]
+    public async Task GenerateMapAsync_ExactStreetNames_ForwardsMatchingMode()
+    {
+        var geoData = new FakeGeoDataService();
+        var renderer = CreateRenderer(CreateSolidTilePng(SKColors.White), geoData);
+        var request = new MapRequest
+        {
+            CityName = "Таганрог",
+            HighlightStreets = ["1-й Новый переулок"],
+            ExactStreetNames = true,
+            Width = 256,
+            Height = 256
+        };
+
+        await renderer.GenerateMapAsync(request, "test-exact-streets");
+
+        Assert.True(geoData.LastExactStreetNames);
     }
 
     [Fact]

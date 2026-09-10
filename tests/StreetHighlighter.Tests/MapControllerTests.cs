@@ -127,7 +127,8 @@ public class MapControllerTests
             height: 800,
             zoom: 14,
             offsetX: 120,
-            offsetY: -80);
+            offsetY: -80,
+            exactStreetNames: true);
 
         Assert.IsType<FileContentResult>(result);
         Assert.NotNull(capturedRequest);
@@ -141,6 +142,7 @@ public class MapControllerTests
         Assert.Equal(14, capturedRequest.Zoom);
         Assert.Equal(120, capturedRequest.OffsetX);
         Assert.Equal(-80, capturedRequest.OffsetY);
+        Assert.True(capturedRequest.ExactStreetNames);
         Assert.Equal("public, max-age=3600", httpContext.Response.Headers.CacheControl.ToString());
     }
 }

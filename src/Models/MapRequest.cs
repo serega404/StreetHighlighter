@@ -13,6 +13,8 @@ namespace StreetHighlighter.Models
         [MaxLength(100, ErrorMessage = "A maximum of 100 streets can be highlighted per request.")]
         public List<string> HighlightStreets { get; set; } = new();
 
+        public bool ExactStreetNames { get; set; }
+
         public StyleSettings Style { get; set; } = new();
         
         // Output image size

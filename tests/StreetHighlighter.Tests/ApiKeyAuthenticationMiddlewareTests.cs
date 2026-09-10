@@ -53,6 +53,20 @@ public class ApiKeyAuthenticationMiddlewareTests
     }
 
     [Fact]
+    public async Task InvokeAsync_WhenApiKeyIsConfigured_ProtectsStreetListRequest()
+    {
+        var nextCalled = false;
+        var middleware = CreateMiddleware("secret-key", () => nextCalled = true);
+        var context = new DefaultHttpContext();
+        context.Request.Path = "/api/v1/streets";
+
+        await middleware.InvokeAsync(context);
+
+        Assert.False(nextCalled);
+        Assert.Equal(StatusCodes.Status401Unauthorized, context.Response.StatusCode);
+    }
+
+    [Fact]
     public async Task InvokeAsync_WhenApiKeyIsConfigured_AllowsHealthCheck()
     {
         var nextCalled = false;
