@@ -1,6 +1,10 @@
 # StreetHighlighter
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/serega404/streethighlighter.svg)](https://github.com/serega404/streethighlighter/releases/latest)
+[![.NET](https://img.shields.io/badge/.NET-10.0-blue.svg)](https://dotnet.microsoft.com/download/dotnet/10.0)
+![GitHub last commit](https://img.shields.io/github/last-commit/serega404/StreetHighlighter)
+![GitHub repo size](https://img.shields.io/github/repo-size/serega404/StreetHighlighter)
 
 [English version](README.en.md)
 
